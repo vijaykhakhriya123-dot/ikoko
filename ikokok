@@ -1,0 +1,1183 @@
+import requests
+import json
+import os
+import time
+import random
+import threading
+import websocket
+import re
+import urllib.parse
+from datetime import datetime
+
+# ==================== OWNER CONFIGURATION ====================
+OWNER_ID = "1471125025334628364"
+
+# ==================== TOKEN CONFIGURATION ====================
+# Apna Discord token yaha single ya double quotes ke andar dalein:
+# Example: TOKENS = ["YOUR_TOKEN_HERE"] ya multiple tokens ke liye: ["TOKEN_1", "TOKEN_2"]
+TOKENS = [
+    "MTU0MDI0MDEyMDUwMDg1MDgwOA.GLx0Ov.HCw7VoXVoS4xSJtX_nSqmgA38E4qlM4lRKcA04"
+]
+
+# --- FILES & PATHS ---
+SUDO_FILE = "sudo_users.json"
+PREFIX = "*"
+
+# --- SYSTEM FLAGS ---
+ACTIVE_NC_CHANNELS = {}
+ACTIVE_CUSTOM_NC_CHANNELS = {}
+ACTIVE_SPAM_CHANNELS = {}
+ACTIVE_SPAM2_CHANNELS = {}
+ACTIVE_CUSTOM_SPAM_CHANNELS = {}
+ACTIVE_PIC_SPAM_CHANNELS = {}
+
+SPAM_STOP_EVENTS = {}
+SPAM2_STOP_EVENTS = {}
+CUSTOM_SPAM_STOP_EVENTS = {}
+PIC_SPAM_STOP_EVENTS = {}
+
+AUTOREPLY_TARGETS = {}
+AUTOREACT_EMOJIS = {}
+
+MEGA_SPAM_ACTIVE = {}
+MEGA_SPAM_STATS = {}
+SNIPE_CACHE = {}
+MESSAGE_CACHE = {}
+AFK_STATE = {"is_afk": False, "reason": "AFK", "start_time": None}
+
+ACTIVE_AUTOPING_CHANNELS = {}
+START_TIME = time.time()
+BOT_INSTANCES = []
+
+# --- NC LIST ---
+NC_LIST = [
+    "⚡ 𝐇𝐀𝐓𝐄𝐑𝐒 𝐃𝐎𝐖𝐍 ⚡",
+    "👑 𝐇𝐀𝐓𝐄𝐑𝐒 𝐑𝐔𝐋𝐄𝐃 👑",
+    "💀 𝐇𝐀𝐓𝐄𝐑𝐒 𝐄𝐗𝐏𝐎𝐒𝐄𝐃 💀"
+]
+
+BASE_SPAM_MESSAGES = [
+    "## 𝗗ʀᴀ𝗩ɪ𝗢ɴ#𝗩ɪ𝗗ʜ𝗔ʏᴀ𝗞 ON TOP "
+]
+
+SPAM_MESSAGES = [msg * 4 for msg in BASE_SPAM_MESSAGES]
+PLACEHOLDER = "𝐃ʀᴀᴋᴇ×𝐆ʜᴏsᴛ×𝐑ᴏɴɴʏ×𝐊ᴀᴢᴀᴋᴀ×𝐗ᴋᴇᴠɪɴ"
+SPAM2_MESSAGES = ["{ph} SPAM ACTIVE 🔥"]
+REPLY_TEXTS = ["Auto Reply System Activated."]
+
+# --- DELAYS ---
+NC_DELAY = 3
+SPAM_DELAY = 2
+SPAM2_DELAY = 2
+CUSTOM_SPAM_DELAY = 2
+CUSTOM_NC_DELAY = 3
+PIC_SPAM_DELAY = 4
+AUTOPING_DEFAULT_DELAY = 2
+
+# ==================== SUDO MANAGEMENT ====================
+def load_sudo():
+    if os.path.exists(SUDO_FILE):
+        try:
+            with open(SUDO_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_sudo(users):
+    with open(SUDO_FILE, "w") as f:
+        json.dump(users, f)
+
+SUDO_USERS = load_sudo()
+
+# ==================== HELPER FUNCTIONS ====================
+def send_msg(c_id, text, reply_to=None, token=None, bot_idx=0):
+    active_token = token or (TOKENS[0] if TOKENS else None)
+    if not active_token:
+        return None
+    headers = {"Authorization": active_token, "Content-Type": "application/json"}
+    payload = {"content": text}
+    if reply_to:
+        payload["message_reference"] = {"channel_id": c_id, "message_id": reply_to}
+    
+    try:
+        r = requests.post(f"https://discord.com/api/v9/channels/{c_id}/messages",
+                          headers=headers, json=payload, timeout=10)
+        return r
+    except Exception:
+        return None
+
+def send_file(c_id, file_path, token=None, bot_idx=0):
+    active_token = token or (TOKENS[0] if TOKENS else None)
+    if not active_token or not os.path.exists(file_path):
+        return None
+    headers = {"Authorization": active_token}
+    try:
+        with open(file_path, 'rb') as f:
+            r = requests.post(f"https://discord.com/api/v9/channels/{c_id}/messages",
+                              headers=headers, files={"file": f}, timeout=15)
+        return r
+    except Exception:
+        return None
+
+def delete_msg(c_id, m_id, token=None, bot_idx=0):
+    active_token = token or (TOKENS[0] if TOKENS else None)
+    if not active_token:
+        return False
+    try:
+        r = requests.delete(f"https://discord.com/api/v9/channels/{c_id}/messages/{m_id}",
+                            headers={"Authorization": active_token}, timeout=5)
+        return r.status_code in [200, 204]
+    except Exception:
+        return False
+
+def ghost_ping_user(c_id, mention_text, token=None, bot_idx=0):
+    res = send_msg(c_id, mention_text, token=token, bot_idx=bot_idx)
+    if res and res.status_code == 200:
+        msg_id = res.json().get("id")
+        time.sleep(0.1)
+        delete_msg(c_id, msg_id, token=token, bot_idx=bot_idx)
+
+def download_image(url, bot_idx=0):
+    try:
+        r = requests.get(url, stream=True, timeout=10)
+        if r.status_code == 200:
+            path = f"temp_{random.randint(1000,9999)}.jpg"
+            with open(path, 'wb') as f:
+                for chunk in r.iter_content(1024):
+                    f.write(chunk)
+            return path
+        return None
+    except Exception:
+        return None
+
+def change_gc_name(g_id, name, token=None, bot_idx=0):
+    active_token = token or (TOKENS[0] if TOKENS else None)
+    if not active_token:
+        return None
+    headers = {"Authorization": active_token, "Content-Type": "application/json"}
+    try:
+        r = requests.patch(f"https://discord.com/api/v9/channels/{g_id}",
+                           headers=headers, json={"name": name}, timeout=5)
+        return r
+    except Exception:
+        return None
+
+def add_reaction(c_id, m_id, emoji, token=None, bot_idx=0):
+    active_token = token or (TOKENS[0] if TOKENS else None)
+    if not active_token:
+        return
+    encoded_emoji = requests.utils.quote(emoji)
+    url = f"https://discord.com/api/v9/channels/{c_id}/messages/{m_id}/reactions/{encoded_emoji}/@me"
+    try:
+        requests.put(url, headers={"Authorization": active_token}, timeout=5)
+    except Exception:
+        pass
+
+def get_user_info(user_id, token, bot_idx=0):
+    try:
+        r = requests.get(f"https://discord.com/api/v9/users/{user_id}",
+                         headers={"Authorization": token}, timeout=10)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+def get_channel_info(channel_id, token, bot_idx=0):
+    try:
+        r = requests.get(f"https://discord.com/api/v9/channels/{channel_id}",
+                         headers={"Authorization": token}, timeout=10)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+def get_guild_info(guild_id, token, bot_idx=0):
+    try:
+        r = requests.get(f"https://discord.com/api/v9/guilds/{guild_id}?with_counts=true",
+                         headers={"Authorization": token}, timeout=10)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+def extract_user_id_from_mention(mention):
+    if mention.startswith('<@') and mention.endswith('>'):
+        mention = mention[2:-1]
+        if mention.startswith('!'):
+            mention = mention[1:]
+    else:
+        if mention.startswith('@'):
+            mention = mention[1:]
+    match = re.search(r'\d+', mention)
+    if match:
+        return match.group()
+    return None
+
+def extract_target_info(mention, token):
+    if mention.startswith('<@') and mention.endswith('>'):
+        user_id = mention[2:-1]
+        if user_id.startswith('!'):
+            user_id = user_id[1:]
+        data = get_user_info(user_id, token)
+        if data and 'username' in data:
+            return data['username']
+        else:
+            return user_id
+    else:
+        return mention
+
+def get_account_creation_date(snowflake_id):
+    try:
+        timestamp = ((int(snowflake_id) >> 22) + 1420070400000) / 1000
+        return datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S UTC')
+    except Exception:
+        return "Unknown"
+
+def pad_to_length(text, max_len):
+    if len(text) >= max_len:
+        return text[:max_len]
+    padded = text
+    while len(padded) < max_len:
+        remaining = max_len - len(padded) - 1
+        if remaining <= 0:
+            padded += ' '
+            break
+        padded += ' ' + text[:remaining]
+    return padded[:max_len]
+
+def auto_adjust_message(text, max_len=2000):
+    if len(text) <= max_len:
+        return text
+    text = ' '.join(text.split())
+    if len(text) <= max_len:
+        return text
+    return text[:max_len]
+
+# ==================== MEDIA / QR / OCR ENGINES ====================
+def generate_qr_code(text):
+    try:
+        encoded_data = urllib.parse.quote(text)
+        api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded_data}"
+        r = requests.get(api_url, timeout=10)
+        if r.status_code == 200:
+            file_name = f"qr_{random.randint(1000, 9999)}.png"
+            with open(file_name, "wb") as f:
+                f.write(r.content)
+            return file_name
+    except Exception:
+        pass
+    return None
+
+def extract_ocr_text(image_url):
+    try:
+        encoded_url = urllib.parse.quote(image_url)
+        api_url = f"https://api.ocr.space/parse/imageurl?apikey=helloworld&url={encoded_url}"
+        r = requests.get(api_url, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            results = data.get("ParsedResults", [])
+            if results:
+                parsed_text = results[0].get("ParsedText", "").strip()
+                return parsed_text if parsed_text else "No text found in image."
+    except Exception as e:
+        return f"OCR Error: {e}"
+    return "Failed to parse OCR image."
+
+def capture_website_screenshot(target_url):
+    try:
+        if not target_url.startswith("http://") and not target_url.startswith("https://"):
+            target_url = "https://" + target_url
+        encoded_url = urllib.parse.quote(target_url)
+        api_url = f"https://image.thum.io/get/width/1200/crop/800/noanimate/{encoded_url}"
+        r = requests.get(api_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        if r.status_code == 200:
+            file_name = f"ss_{random.randint(1000, 9999)}.png"
+            with open(file_name, "wb") as f:
+                f.write(r.content)
+            return file_name
+    except Exception:
+        pass
+    return None
+
+def generate_ascii_art(text):
+    return f"```\n{text.upper()}\n```"
+
+def generate_tts_file(text, lang="en"):
+    try:
+        encoded_text = urllib.parse.quote(text)
+        url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={encoded_text}&tl={lang}&client=tw-ob"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        if r.status_code == 200:
+            file_name = f"tts_{random.randint(1000, 9999)}.mp3"
+            with open(file_name, "wb") as f:
+                f.write(r.content)
+            return file_name
+    except Exception:
+        pass
+    return None
+
+# ==================== SPAM & PING WORKERS ====================
+def autoping_worker(c_id, mention_text, delay_sec, token=None):
+    key = f"{c_id}_{token[:10] if token else ''}"
+    while ACTIVE_AUTOPING_CHANNELS.get(key, False):
+        ghost_ping_user(c_id, mention_text, token=token)
+        time.sleep(delay_sec)
+
+def nc_worker(g_id, target_name, token=None):
+    key = f"{g_id}_{token[:10] if token else ''}"
+    while ACTIVE_NC_CHANNELS.get(key, False):
+        base_line = random.choice(NC_LIST)
+        replaced = base_line.replace("𝐇𝐀𝐓𝐄𝐑𝐒", target_name)
+        final_name = replaced[:100] if len(replaced) >= 100 else pad_to_length(replaced, 100)
+        change_gc_name(g_id, final_name, token)
+        time.sleep(NC_DELAY)
+
+def custom_nc_worker(g_id, custom_text, token=None):
+    key = f"{g_id}_{token[:10] if token else ''}"
+    while ACTIVE_CUSTOM_NC_CHANNELS.get(key, False):
+        final_name = custom_text[:100] if len(custom_text) >= 100 else pad_to_length(custom_text, 100)
+        change_gc_name(g_id, final_name, token)
+        time.sleep(CUSTOM_NC_DELAY)
+
+def spam_worker(c_id, target_name, token=None):
+    key = f"{c_id}_{token[:10] if token else ''}"
+    while ACTIVE_SPAM_CHANNELS.get(key, False):
+        for msg_template in SPAM_MESSAGES:
+            if not ACTIVE_SPAM_CHANNELS.get(key, False):
+                break
+            msg = msg_template.replace("##𝗗ʀᴀ𝗩ɪ𝗢ɴ#𝗩ɪ𝗗ʜ𝗔ʏᴀ𝗞", target_name).replace("𝗗ʀᴀ𝗩ɪ𝗢ɴ#𝗩ɪ𝗗ʜ𝗔ʏᴀ𝗞", target_name)
+            send_msg(c_id, msg[:2000], token=token)
+            time.sleep(SPAM_DELAY)
+
+def spam2_worker(c_id, target_name, token=None):
+    key = f"{c_id}_{token[:10] if token else ''}"
+    while ACTIVE_SPAM2_CHANNELS.get(key, False):
+        for msg_template in SPAM2_MESSAGES:
+            if not ACTIVE_SPAM2_CHANNELS.get(key, False):
+                break
+            msg = pad_to_length(msg_template.replace("{ph}", target_name), 2000)
+            send_msg(c_id, msg, token=token)
+            time.sleep(SPAM2_DELAY)
+
+def custom_spam_worker(c_id, text, token=None):
+    key = f"{c_id}_{token[:10] if token else ''}"
+    while ACTIVE_CUSTOM_SPAM_CHANNELS.get(key, False):
+        if not text.startswith("# "):
+            text = "# " + text
+        send_msg(c_id, auto_adjust_message(text, 2000), token=token)
+        time.sleep(CUSTOM_SPAM_DELAY)
+
+def pic_spam_worker(c_id, file_path, token=None):
+    key = f"{c_id}_{token[:10] if token else ''}"
+    try:
+        while ACTIVE_PIC_SPAM_CHANNELS.get(key, False):
+            send_file(c_id, file_path, token)
+            time.sleep(PIC_SPAM_DELAY)
+    finally:
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+
+def mega_spam_worker(c_id, message, token=None, intensity=10):
+    key = f"{c_id}_{token[:10] if token else ''}"
+    counter = 0
+    if not message.startswith("# "):
+        message = "# " + message
+    variations = [message, message.upper(), message.lower(), f"{message} 🔥", f"{message} 💀", f"{message} ⚡", f"{message} 💥", f"{message} 🎯"]
+    while MEGA_SPAM_ACTIVE.get(key, False):
+        try:
+            msg = random.choice(variations)
+            if counter % 5 == 0:
+                msg = f"# [{counter}] {msg.replace('# ', '')}"
+            send_msg(c_id, auto_adjust_message(msg, 2000), token=token)
+            counter += 1
+            if counter % 10 == 0:
+                MEGA_SPAM_STATS[key] = counter
+        except Exception:
+            pass
+        time.sleep(random.uniform(0.01, 0.05))
+
+# ==================== BOT CLIENT ====================
+class DiscordSelfBot:
+    def __init__(self, token, bot_index):
+        self.token = token
+        self.bot_index = bot_index
+        self.ws = None
+        self.running = True
+        self.user_id = None
+        self.current_status = "online"
+        self.current_activity = None
+
+    def update_presence(self, status=None, activity_type=0, activity_name=None):
+        if status:
+            self.current_status = status
+        if activity_name:
+            self.current_activity = {"name": activity_name, "type": activity_type}
+        
+        payload = {
+            "op": 3,
+            "d": {
+                "since": 0,
+                "activities": [self.current_activity] if self.current_activity else [],
+                "status": self.current_status,
+                "afk": False
+            }
+        }
+        if self.ws and self.ws.sock and self.ws.sock.connected:
+            try:
+                self.ws.send(json.dumps(payload))
+            except Exception:
+                pass
+
+    def join_voice_channel(self, guild_id, channel_id, mute=False, deaf=False):
+        payload = {
+            "op": 4,
+            "d": {
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "self_mute": mute,
+                "self_deaf": deaf
+            }
+        }
+        if self.ws and self.ws.sock and self.ws.sock.connected:
+            try:
+                self.ws.send(json.dumps(payload))
+                return True
+            except Exception:
+                return False
+        return False
+
+    def leave_voice_channel(self, guild_id):
+        return self.join_voice_channel(guild_id, None)
+
+    def on_message(self, ws, message):
+        global ACTIVE_NC_CHANNELS, ACTIVE_CUSTOM_NC_CHANNELS
+        global ACTIVE_SPAM_CHANNELS, ACTIVE_SPAM2_CHANNELS, ACTIVE_CUSTOM_SPAM_CHANNELS, ACTIVE_PIC_SPAM_CHANNELS
+        global SPAM_STOP_EVENTS, SPAM2_STOP_EVENTS, CUSTOM_SPAM_STOP_EVENTS, PIC_SPAM_STOP_EVENTS
+        global AUTOREPLY_TARGETS, AUTOREACT_EMOJIS, START_TIME, SUDO_USERS
+        global MEGA_SPAM_ACTIVE, MEGA_SPAM_STATS
+        global SNIPE_CACHE, MESSAGE_CACHE, AFK_STATE
+        global ACTIVE_AUTOPING_CHANNELS
+        
+        try:
+            data = json.loads(message)
+        except Exception:
+            return
+
+        if data.get("op") == 10:
+            heartbeat_interval = data["d"]["heartbeat_interval"] / 1000
+            def heartbeat():
+                while self.running:
+                    time.sleep(heartbeat_interval)
+                    try:
+                        ws.send(json.dumps({"op": 1, "d": None}))
+                    except Exception:
+                        break
+            threading.Thread(target=heartbeat, daemon=True).start()
+            
+            ws.send(json.dumps({
+                "op": 2,
+                "d": {
+                    "token": self.token,
+                    "properties": {
+                        "$os": "Windows",
+                        "$browser": "Chrome",
+                        "$device": ""
+                    }
+                }
+            }))
+            
+            try:
+                r = requests.get("https://discord.com/api/v9/users/@me", headers={"Authorization": self.token}, timeout=10)
+                if r.status_code == 200:
+                    self.user_id = r.json().get('id')
+            except Exception:
+                pass
+            print(f"[✓] Bot {self.bot_index + 1} Connected")
+
+        if data.get("t") == "MESSAGE_DELETE":
+            d = data.get("d", {})
+            m_id = d.get("id")
+            c_id = d.get("channel_id")
+            if m_id in MESSAGE_CACHE:
+                SNIPE_CACHE[c_id] = MESSAGE_CACHE[m_id]
+
+        if data.get("t") == "MESSAGE_CREATE":
+            msg = data.get("d", {})
+            auth_id = msg.get("author", {}).get("id")
+            author_name = msg.get("author", {}).get("username", "Unknown")
+            content = msg.get("content", "").strip()
+            c_id = msg.get("channel_id")
+            m_id = msg.get("id")
+            key_suffix = f"{c_id}_{self.token[:10]}"
+
+            if m_id and content:
+                MESSAGE_CACHE[m_id] = {
+                    "author": author_name,
+                    "content": content,
+                    "time": datetime.now().strftime("%H:%M:%S")
+                }
+                if len(MESSAGE_CACHE) > 500:
+                    MESSAGE_CACHE.pop(next(iter(MESSAGE_CACHE)))
+
+            if AFK_STATE["is_afk"] and self.user_id:
+                mentions = [u.get("id") for u in msg.get("mentions", [])]
+                if self.user_id in mentions and auth_id != self.user_id:
+                    afk_elapsed = int(time.time() - AFK_STATE["start_time"])
+                    reply = f"# 🌙 [AFK] Currently AFK: **{AFK_STATE['reason']}** ({afk_elapsed}s ago)"
+                    send_msg(c_id, reply, reply_to=m_id, token=self.token, bot_idx=self.bot_index)
+
+            if c_id in AUTOREPLY_TARGETS:
+                if auth_id in AUTOREPLY_TARGETS[c_id]:
+                    if self.user_id and auth_id != self.user_id:
+                        reply_text = random.choice(REPLY_TEXTS)
+                        if not reply_text.startswith("# "):
+                            reply_text = "# " + reply_text
+                        send_msg(c_id, auto_adjust_message(reply_text, 2000), reply_to=m_id, token=self.token, bot_idx=self.bot_index)
+
+            if c_id in AUTOREACT_EMOJIS:
+                emoji = AUTOREACT_EMOJIS[c_id]
+                if self.user_id and auth_id != self.user_id:
+                    threading.Thread(target=add_reaction, args=(c_id, m_id, emoji, self.token, self.bot_index), daemon=True).start()
+
+            if auth_id != OWNER_ID and auth_id not in SUDO_USERS:
+                return
+
+            if not content.startswith(PREFIX):
+                return
+
+            cmd_part = content[len(PREFIX):].strip()
+            cmd_lower = cmd_part.lower()
+
+            # ==================== SHORT HELP MENU ====================
+            if cmd_lower == "help":
+                help_msg = (
+                    "```yaml\n"
+                    "=== COMMANDS LIST ===\n"
+                    "• UTILS: *ping | *purge <n> | *snipe | *userinfo [@u] | *serverinfo\n"
+                    "• MEDIA: *qr <txt> | *ocr <url> | *screenshot <url> | *tts <ln> <txt> | *poll <Q>|<A>|<B>\n"
+                    "• VC   : *joinvc <g_id> <vc_id> | *leavevc <g_id> | *vcmute <g> <vc> | *vcdeaf <g> <vc>\n"
+                    "• PING : *ghostping @u | *autopinger @u [delay] | *stopautopinger | *massping @u1 @u2\n"
+                    "• STATUS: *setstatus <opt> | *setactivity <type> <txt> | *afk [txt] | *unafk | *tokenstatus\n"
+                    "• SPAM : *spam @u | *spam2 <t> | *customspam <t> | *picspam <url> | *megaspam <msg> [n]\n"
+                    "• NC   : *nc @u | *customnc <txt> | *stopnc | *stopcustomnc\n"
+                    "• STOP : *stopspam | *stopspam2 | *stopcustomspam | *stoppic | *stopmegaspam | *stopall\n"
+                    "• SUDO : *access @u | *removeaccess @u | *showusers\n"
+                    "```"
+                )
+                send_msg(c_id, help_msg, token=self.token, bot_idx=self.bot_index)
+                return
+
+            # ==================== MEDIA, QR, OCR & SCREENSHOT COMMANDS ====================
+            if cmd_lower.startswith("qr "):
+                parts = cmd_part.split(maxsplit=1)
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *qr <text/link>", token=self.token, bot_idx=self.bot_index)
+                    return
+                qr_path = generate_qr_code(parts[1])
+                if qr_path:
+                    send_file(c_id, qr_path, token=self.token, bot_idx=self.bot_index)
+                    if os.path.exists(qr_path):
+                        os.remove(qr_path)
+                else:
+                    send_msg(c_id, "# ❌ Failed to generate QR Code.", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("ocr "):
+                parts = cmd_part.split(maxsplit=1)
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *ocr <image_url>", token=self.token, bot_idx=self.bot_index)
+                    return
+                extracted = extract_ocr_text(parts[1])
+                send_msg(c_id, f"# 📝 **OCR Result:**\n```\n{extracted}\n```", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("screenshot "):
+                parts = cmd_part.split(maxsplit=1)
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *screenshot <website_url>", token=self.token, bot_idx=self.bot_index)
+                    return
+                ss_path = capture_website_screenshot(parts[1])
+                if ss_path:
+                    send_file(c_id, ss_path, token=self.token, bot_idx=self.bot_index)
+                    if os.path.exists(ss_path):
+                        os.remove(ss_path)
+                else:
+                    send_msg(c_id, "# ❌ Failed to capture screenshot.", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("tts "):
+                parts = cmd_part.split(maxsplit=2)
+                if len(parts) < 3:
+                    send_msg(c_id, "# ❌ Usage: *tts <lang_code> <message> (e.g. *tts en Hello)", token=self.token, bot_idx=self.bot_index)
+                    return
+                tts_path = generate_tts_file(parts[2], lang=parts[1].lower())
+                if tts_path:
+                    send_file(c_id, tts_path, token=self.token, bot_idx=self.bot_index)
+                    if os.path.exists(tts_path):
+                        os.remove(tts_path)
+                else:
+                    send_msg(c_id, "# ❌ Failed to generate TTS audio.", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("ascii "):
+                parts = cmd_part.split(maxsplit=1)
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *ascii <text>", token=self.token, bot_idx=self.bot_index)
+                    return
+                send_msg(c_id, generate_ascii_art(parts[1]), token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("poll "):
+                parts = cmd_part[5:].split("|")
+                if len(parts) < 3:
+                    send_msg(c_id, "# ❌ Usage: *poll Question | Option 1 | Option 2 | ...", token=self.token, bot_idx=self.bot_index)
+                    return
+                question = parts[0].strip()
+                options = [opt.strip() for opt in parts[1:] if opt.strip()]
+                number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+                if len(options) > len(number_emojis):
+                    options = options[:len(number_emojis)]
+                
+                poll_text = f"📊 **POLL: {question}**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                for idx, opt in enumerate(options):
+                    poll_text += f"{number_emojis[idx]} {opt}\n"
+                
+                res = send_msg(c_id, poll_text, token=self.token, bot_idx=self.bot_index)
+                if res and res.status_code == 200:
+                    poll_msg_id = res.json().get("id")
+                    for idx in range(len(options)):
+                        add_reaction(c_id, poll_msg_id, number_emojis[idx], token=self.token, bot_idx=self.bot_index)
+                        time.sleep(0.2)
+                return
+
+            # ==================== TOKEN & STATUS ====================
+            if cmd_lower == "tokenstatus":
+                status_text = (
+                    f"```\n"
+                    f"🛡️ TOKENS LOADED: {len(TOKENS)}\n"
+                    f"```"
+                )
+                send_msg(c_id, status_text, token=self.token, bot_idx=self.bot_index)
+                return
+
+            # ==================== VOICE CHANNEL CONTROLS ====================
+            if cmd_lower.startswith("joinvc "):
+                parts = cmd_part.split()
+                if len(parts) < 3:
+                    send_msg(c_id, "# ❌ Usage: *joinvc <guild_id> <channel_id>", token=self.token, bot_idx=self.bot_index)
+                    return
+                g_id, vc_id = parts[1], parts[2]
+                if self.join_voice_channel(g_id, vc_id):
+                    send_msg(c_id, f"# 🎙️ Joined VC `{vc_id}` in `{g_id}`", token=self.token, bot_idx=self.bot_index)
+                else:
+                    send_msg(c_id, "# ❌ Failed to join VC.", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("leavevc "):
+                parts = cmd_part.split()
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *leavevc <guild_id>", token=self.token, bot_idx=self.bot_index)
+                    return
+                self.leave_voice_channel(parts[1])
+                send_msg(c_id, f"# 🔌 Left VC in `{parts[1]}`", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("vcmute "):
+                parts = cmd_part.split()
+                if len(parts) < 3:
+                    send_msg(c_id, "# ❌ Usage: *vcmute <guild_id> <channel_id>", token=self.token, bot_idx=self.bot_index)
+                    return
+                self.join_voice_channel(parts[1], parts[2], mute=True, deaf=False)
+                send_msg(c_id, f"# 🔇 Joined VC `{parts[2]}` (Muted)", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("vcdeaf "):
+                parts = cmd_part.split()
+                if len(parts) < 3:
+                    send_msg(c_id, "# ❌ Usage: *vcdeaf <guild_id> <channel_id>", token=self.token, bot_idx=self.bot_index)
+                    return
+                self.join_voice_channel(parts[1], parts[2], mute=True, deaf=True)
+                send_msg(c_id, f"# 🎧 Joined VC `{parts[2]}` (Deaf & Mute)", token=self.token, bot_idx=self.bot_index)
+                return
+
+            # ==================== GHOST PING & AUTO-PINGER ====================
+            if cmd_lower.startswith("ghostping "):
+                parts = cmd_part.split()
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *ghostping @user", token=self.token, bot_idx=self.bot_index)
+                    return
+                threading.Thread(target=ghost_ping_user, args=(c_id, parts[1], self.token, self.bot_index), daemon=True).start()
+                return
+
+            if cmd_lower.startswith("autopinger "):
+                parts = cmd_part.split()
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *autopinger @user [delay_seconds]", token=self.token, bot_idx=self.bot_index)
+                    return
+                delay_sec = AUTOPING_DEFAULT_DELAY
+                if len(parts) >= 3 and parts[2].isdigit():
+                    delay_sec = max(1, int(parts[2]))
+                ACTIVE_AUTOPING_CHANNELS[key_suffix] = True
+                threading.Thread(target=autoping_worker, args=(c_id, parts[1], delay_sec, self.token), daemon=True).start()
+                send_msg(c_id, f"# 👻 **Auto-Ping Active** on {parts[1]} ({delay_sec}s)", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "stopautopinger":
+                ACTIVE_AUTOPING_CHANNELS[key_suffix] = False
+                send_msg(c_id, "# 🛑 **Auto-Ping Stopped**", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("massping "):
+                parts = cmd_part.split()
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *massping @u1 @u2 ...", token=self.token, bot_idx=self.bot_index)
+                    return
+                threading.Thread(target=ghost_ping_user, args=(c_id, ' '.join(parts[1:]), self.token, self.bot_index), daemon=True).start()
+                return
+
+            # ==================== STATUS & PRESENCE ====================
+            if cmd_lower.startswith("setstatus "):
+                parts = cmd_part.split()
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *setstatus <online|idle|dnd|invisible>", token=self.token, bot_idx=self.bot_index)
+                    return
+                status_choice = parts[1].lower()
+                if status_choice not in ["online", "idle", "dnd", "invisible"]:
+                    send_msg(c_id, "# ❌ Invalid status!", token=self.token, bot_idx=self.bot_index)
+                    return
+                for b in BOT_INSTANCES:
+                    b.update_presence(status=status_choice)
+                send_msg(c_id, f"# 🟢 Status: `{status_choice.upper()}`", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("setactivity "):
+                parts = cmd_part.split(maxsplit=2)
+                if len(parts) < 3:
+                    send_msg(c_id, "# ❌ Usage: *setactivity <Playing|Streaming|Listening|Watching> <Text>", token=self.token, bot_idx=self.bot_index)
+                    return
+                act_type_str = parts[1].lower()
+                type_map = {"playing": 0, "streaming": 1, "listening": 2, "watching": 3}
+                if act_type_str not in type_map:
+                    send_msg(c_id, "# ❌ Invalid activity!", token=self.token, bot_idx=self.bot_index)
+                    return
+                for b in BOT_INSTANCES:
+                    b.update_presence(activity_type=type_map[act_type_str], activity_name=parts[2])
+                send_msg(c_id, f"# 🎮 Activity: `{act_type_str.capitalize()} {parts[2]}`", token=self.token, bot_idx=self.bot_index)
+                return
+
+            # ==================== AFK SYSTEM ====================
+            if cmd_lower.startswith("afk"):
+                parts = cmd_part.split(maxsplit=1)
+                reason = parts[1] if len(parts) > 1 else "Busy / AFK"
+                AFK_STATE["is_afk"] = True
+                AFK_STATE["reason"] = reason
+                AFK_STATE["start_time"] = time.time()
+                send_msg(c_id, f"# 🌙 AFK Enabled: **{reason}**", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "unafk":
+                AFK_STATE["is_afk"] = False
+                AFK_STATE["start_time"] = None
+                send_msg(c_id, "# ☀️ AFK Disabled.", token=self.token, bot_idx=self.bot_index)
+                return
+
+            # ==================== UTILITY ====================
+            if cmd_lower.startswith("purge "):
+                parts = cmd_part.split()
+                if len(parts) < 2 or not parts[1].isdigit():
+                    send_msg(c_id, "# ❌ Usage: *purge <amount: 1-100>", token=self.token, bot_idx=self.bot_index)
+                    return
+                amount = min(int(parts[1]), 100)
+                try:
+                    r = requests.get(f"https://discord.com/api/v9/channels/{c_id}/messages?limit=100",
+                                     headers={"Authorization": self.token}, timeout=10)
+                    if r.status_code == 200:
+                        messages = r.json()
+                        deleted = 0
+                        for m in messages:
+                            if m.get("author", {}).get("id") == self.user_id:
+                                if delete_msg(c_id, m.get("id"), token=self.token, bot_idx=self.bot_index):
+                                    deleted += 1
+                                    time.sleep(0.3)
+                                if deleted >= amount:
+                                    break
+                        send_msg(c_id, f"# 🧹 Purged `{deleted}` message(s).", token=self.token, bot_idx=self.bot_index)
+                except Exception as e:
+                    send_msg(c_id, f"# ❌ Purge failed: {e}", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("userinfo"):
+                parts = cmd_part.split()
+                target_uid = self.user_id
+                if len(parts) > 1:
+                    target_uid = extract_user_id_from_mention(parts[1])
+                if not target_uid:
+                    send_msg(c_id, "# ❌ Invalid user.", token=self.token, bot_idx=self.bot_index)
+                    return
+                user_data = get_user_info(target_uid, self.token, self.bot_index)
+                if not user_data:
+                    send_msg(c_id, "# ❌ Failed to fetch user info.", token=self.token, bot_idx=self.bot_index)
+                    return
+                
+                u_name = f"{user_data.get('username')}#{user_data.get('discriminator', '0')}"
+                u_id = user_data.get('id')
+                avatar = user_data.get('avatar')
+                avatar_url = f"https://cdn.discordapp.com/avatars/{u_id}/{avatar}.png" if avatar else "Default"
+                created_at = get_account_creation_date(u_id)
+                
+                info_msg = (
+                    f"```\n"
+                    f"USER: {u_name} (ID: {u_id})\n"
+                    f"Created: {created_at}\n"
+                    f"Avatar: {avatar_url}\n"
+                    f"```"
+                )
+                send_msg(c_id, info_msg, token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "serverinfo":
+                ch_data = get_channel_info(c_id, self.token, self.bot_index)
+                if not ch_data or "guild_id" not in ch_data:
+                    send_msg(c_id, "# ❌ Must be used inside a Server/Guild.", token=self.token, bot_idx=self.bot_index)
+                    return
+                guild_id = ch_data["guild_id"]
+                guild = get_guild_info(guild_id, self.token, self.bot_index)
+                if not guild:
+                    send_msg(c_id, "# ❌ Could not fetch server details.", token=self.token, bot_idx=self.bot_index)
+                    return
+                
+                s_msg = (
+                    f"```\n"
+                    f"SERVER: {guild.get('name')} (ID: {guild_id})\n"
+                    f"Owner: {guild.get('owner_id')} | Members: {guild.get('approximate_member_count', 'N/A')}\n"
+                    f"Created: {get_account_creation_date(guild_id)}\n"
+                    f"```"
+                )
+                send_msg(c_id, s_msg, token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "snipe":
+                if c_id in SNIPE_CACHE:
+                    sniped = SNIPE_CACHE[c_id]
+                    send_msg(c_id, f"# 🎯 **Snipe:**\n> **Author:** {sniped['author']}\n> **Message:** {sniped['content']}\n> **Time:** {sniped['time']}", token=self.token, bot_idx=self.bot_index)
+                else:
+                    send_msg(c_id, "# ℹ️ No recently deleted messages.", token=self.token, bot_idx=self.bot_index)
+                return
+
+            # ==================== BASIC SPAM COMMANDS ====================
+            if cmd_lower.startswith("nc "):
+                parts = cmd_part.split()
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *nc @user", token=self.token, bot_idx=self.bot_index)
+                    return
+                target_name = extract_target_info(parts[1], self.token)
+                ACTIVE_NC_CHANNELS[key_suffix] = True
+                threading.Thread(target=nc_worker, args=(c_id, target_name, self.token), daemon=True).start()
+                send_msg(c_id, f"# ✅ NC started for {target_name}", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "stopnc":
+                ACTIVE_NC_CHANNELS[key_suffix] = False
+                send_msg(c_id, "# ✅ NC stopped", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("customnc "):
+                parts = cmd_part.split(maxsplit=1)
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *customnc <text>", token=self.token, bot_idx=self.bot_index)
+                    return
+                custom_text = parts[1]
+                ACTIVE_CUSTOM_NC_CHANNELS[key_suffix] = True
+                threading.Thread(target=custom_nc_worker, args=(c_id, custom_text, self.token), daemon=True).start()
+                send_msg(c_id, f"# ✅ Custom NC started: {custom_text[:30]}...", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "stopcustomnc":
+                ACTIVE_CUSTOM_NC_CHANNELS[key_suffix] = False
+                send_msg(c_id, "# ✅ Custom NC stopped", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("spam "):
+                parts = cmd_part.split()
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *spam @user", token=self.token, bot_idx=self.bot_index)
+                    return
+                target_name = extract_target_info(parts[1], self.token)
+                if c_id not in SPAM_STOP_EVENTS:
+                    SPAM_STOP_EVENTS[c_id] = threading.Event()
+                else:
+                    SPAM_STOP_EVENTS[c_id].set()
+                    SPAM_STOP_EVENTS[c_id] = threading.Event()
+                ACTIVE_SPAM_CHANNELS[key_suffix] = True
+                threading.Thread(target=spam_worker, args=(c_id, target_name, self.token), daemon=True).start()
+                send_msg(c_id, f"# ✅ Spam started for {target_name}", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "stopspam":
+                if c_id in SPAM_STOP_EVENTS:
+                    SPAM_STOP_EVENTS[c_id].set()
+                ACTIVE_SPAM_CHANNELS[key_suffix] = False
+                send_msg(c_id, "# ✅ Spam stopped", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("spam2 "):
+                parts = cmd_part.split()
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *spam2 <target>", token=self.token, bot_idx=self.bot_index)
+                    return
+                target_name = extract_target_info(parts[1], self.token)
+                if c_id not in SPAM2_STOP_EVENTS:
+                    SPAM2_STOP_EVENTS[c_id] = threading.Event()
+                else:
+                    SPAM2_STOP_EVENTS[c_id].set()
+                    SPAM2_STOP_EVENTS[c_id] = threading.Event()
+                ACTIVE_SPAM2_CHANNELS[key_suffix] = True
+                threading.Thread(target=spam2_worker, args=(c_id, target_name, self.token), daemon=True).start()
+                send_msg(c_id, f"# ✅ Spam2 started for {target_name}", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "stopspam2":
+                if c_id in SPAM2_STOP_EVENTS:
+                    SPAM2_STOP_EVENTS[c_id].set()
+                ACTIVE_SPAM2_CHANNELS[key_suffix] = False
+                send_msg(c_id, "# ✅ Spam2 stopped", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("customspam "):
+                parts = cmd_part.split(maxsplit=1)
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *customspam <text>", token=self.token, bot_idx=self.bot_index)
+                    return
+                custom_text = parts[1]
+                if not custom_text.startswith("# "):
+                    custom_text = "# " + custom_text
+                custom_text = auto_adjust_message(custom_text, 2000)
+                if c_id not in CUSTOM_SPAM_STOP_EVENTS:
+                    CUSTOM_SPAM_STOP_EVENTS[c_id] = threading.Event()
+                else:
+                    CUSTOM_SPAM_STOP_EVENTS[c_id].set()
+                    CUSTOM_SPAM_STOP_EVENTS[c_id] = threading.Event()
+                ACTIVE_CUSTOM_SPAM_CHANNELS[key_suffix] = True
+                threading.Thread(target=custom_spam_worker, args=(c_id, custom_text, self.token), daemon=True).start()
+                send_msg(c_id, f"# ✅ Custom spam started: `{custom_text[:30]}...`", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "stopcustomspam":
+                if c_id in CUSTOM_SPAM_STOP_EVENTS:
+                    CUSTOM_SPAM_STOP_EVENTS[c_id].set()
+                ACTIVE_CUSTOM_SPAM_CHANNELS[key_suffix] = False
+                send_msg(c_id, "# ✅ Custom spam stopped", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("picspam "):
+                parts = cmd_part.split(maxsplit=1)
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *picspam <image_url>", token=self.token, bot_idx=self.bot_index)
+                    return
+                file_path = download_image(parts[1], self.bot_index)
+                if not file_path:
+                    send_msg(c_id, "# ❌ Failed to download image.", token=self.token, bot_idx=self.bot_index)
+                    return
+                if c_id not in PIC_SPAM_STOP_EVENTS:
+                    PIC_SPAM_STOP_EVENTS[c_id] = threading.Event()
+                else:
+                    PIC_SPAM_STOP_EVENTS[c_id].set()
+                    PIC_SPAM_STOP_EVENTS[c_id] = threading.Event()
+                ACTIVE_PIC_SPAM_CHANNELS[key_suffix] = True
+                threading.Thread(target=pic_spam_worker, args=(c_id, file_path, self.token), daemon=True).start()
+                send_msg(c_id, f"# ✅ Pic spam started ({os.path.basename(file_path)})", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "stoppicspam":
+                if c_id in PIC_SPAM_STOP_EVENTS:
+                    PIC_SPAM_STOP_EVENTS[c_id].set()
+                ACTIVE_PIC_SPAM_CHANNELS[key_suffix] = False
+                send_msg(c_id, "# ✅ Pic spam stopped", token=self.token, bot_idx=self.bot_index)
+                return
+
+            # ==================== MEGA SPAM ====================
+            if cmd_lower.startswith("megaspam "):
+                parts = cmd_part.split()
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *megaspam <message> [intensity: 1-20]", token=self.token, bot_idx=self.bot_index)
+                    return
+                intensity = 10
+                if len(parts) >= 3 and parts[-1].isdigit():
+                    intensity = min(int(parts[-1]), 20)
+                    message = ' '.join(parts[1:-1])
+                else:
+                    message = ' '.join(parts[1:])
+                
+                if not message.startswith("# "):
+                    message = "# " + message
+                message = auto_adjust_message(message, 1900)
+                
+                key = f"{c_id}_{self.token[:10]}"
+                if key in MEGA_SPAM_ACTIVE:
+                    MEGA_SPAM_ACTIVE[key] = False
+                    time.sleep(0.5)
+                
+                MEGA_SPAM_ACTIVE[key] = True
+                MEGA_SPAM_STATS[key] = 0
+                
+                for _ in range(intensity):
+                    threading.Thread(target=mega_spam_worker, args=(c_id, message, self.token, intensity), daemon=True).start()
+                    time.sleep(0.01)
+                
+                if len(TOKENS) > 1:
+                    for tok in TOKENS:
+                        if tok != self.token:
+                            threading.Thread(target=mega_spam_worker, args=(c_id, message, tok, max(1, intensity//2)), daemon=True).start()
+                            time.sleep(0.01)
+                
+                send_msg(c_id, f"# 💀 **MEGA SPAM ACTIVATED!** ({intensity} Threads)", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "stopmegaspam":
+                key = f"{c_id}_{self.token[:10]}"
+                if key in MEGA_SPAM_ACTIVE and MEGA_SPAM_ACTIVE[key]:
+                    MEGA_SPAM_ACTIVE[key] = False
+                    total_spam = MEGA_SPAM_STATS.get(key, 0)
+                    send_msg(c_id, f"# ✅ **MEGA SPAM STOPPED!** (Sent: {total_spam})", token=self.token, bot_idx=self.bot_index)
+                else:
+                    send_msg(c_id, "# ℹ️ No mega spam active", token=self.token, bot_idx=self.bot_index)
+                return
+
+            # ==================== STOP ALL ====================
+            if cmd_lower == "stopall":
+                key_prefix = str(c_id)
+                for k in list(ACTIVE_NC_CHANNELS.keys()):
+                    if k.startswith(key_prefix): ACTIVE_NC_CHANNELS[k] = False
+                for k in list(ACTIVE_CUSTOM_NC_CHANNELS.keys()):
+                    if k.startswith(key_prefix): ACTIVE_CUSTOM_NC_CHANNELS[k] = False
+                for k in list(ACTIVE_SPAM_CHANNELS.keys()):
+                    if k.startswith(key_prefix): ACTIVE_SPAM_CHANNELS[k] = False
+                for k in list(ACTIVE_SPAM2_CHANNELS.keys()):
+                    if k.startswith(key_prefix): ACTIVE_SPAM2_CHANNELS[k] = False
+                for k in list(ACTIVE_CUSTOM_SPAM_CHANNELS.keys()):
+                    if k.startswith(key_prefix): ACTIVE_CUSTOM_SPAM_CHANNELS[k] = False
+                for k in list(ACTIVE_PIC_SPAM_CHANNELS.keys()):
+                    if k.startswith(key_prefix): ACTIVE_PIC_SPAM_CHANNELS[k] = False
+                for k in list(MEGA_SPAM_ACTIVE.keys()):
+                    if k.startswith(key_prefix): MEGA_SPAM_ACTIVE[k] = False
+                for k in list(ACTIVE_AUTOPING_CHANNELS.keys()):
+                    if k.startswith(key_prefix): ACTIVE_AUTOPING_CHANNELS[k] = False
+
+                if c_id in SPAM_STOP_EVENTS: SPAM_STOP_EVENTS[c_id].set()
+                if c_id in SPAM2_STOP_EVENTS: SPAM2_STOP_EVENTS[c_id].set()
+                if c_id in CUSTOM_SPAM_STOP_EVENTS: CUSTOM_SPAM_STOP_EVENTS[c_id].set()
+                if c_id in PIC_SPAM_STOP_EVENTS: PIC_SPAM_STOP_EVENTS[c_id].set()
+                if c_id in AUTOREPLY_TARGETS: del AUTOREPLY_TARGETS[c_id]
+                if c_id in AUTOREACT_EMOJIS: del AUTOREACT_EMOJIS[c_id]
+
+                send_msg(c_id, "# 🛑 **ALL ACTIONS STOPPED!**", token=self.token, bot_idx=self.bot_index)
+                return
+
+            # ==================== ACCESS & SUDO ====================
+            if cmd_lower.startswith("access "):
+                if auth_id != OWNER_ID:
+                    send_msg(c_id, "# ❌ Only owner can grant access.", token=self.token, bot_idx=self.bot_index)
+                    return
+                parts = cmd_part.split()
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *access @user", token=self.token, bot_idx=self.bot_index)
+                    return
+                user_id = extract_user_id_from_mention(parts[1])
+                if not user_id:
+                    send_msg(c_id, "# ❌ Invalid mention", token=self.token, bot_idx=self.bot_index)
+                    return
+                if user_id in SUDO_USERS:
+                    send_msg(c_id, "# ℹ️ Already has access", token=self.token, bot_idx=self.bot_index)
+                else:
+                    SUDO_USERS.append(user_id)
+                    save_sudo(SUDO_USERS)
+                    send_msg(c_id, f"# ✅ Granted access to {parts[1]}", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower.startswith("removeaccess "):
+                if auth_id != OWNER_ID:
+                    send_msg(c_id, "# ❌ Only owner can revoke access.", token=self.token, bot_idx=self.bot_index)
+                    return
+                parts = cmd_part.split()
+                if len(parts) < 2:
+                    send_msg(c_id, "# ❌ Usage: *removeaccess @user", token=self.token, bot_idx=self.bot_index)
+                    return
+                user_id = extract_user_id_from_mention(parts[1])
+                if not user_id:
+                    send_msg(c_id, "# ❌ Invalid mention", token=self.token, bot_idx=self.bot_index)
+                    return
+                if user_id in SUDO_USERS:
+                    SUDO_USERS.remove(user_id)
+                    save_sudo(SUDO_USERS)
+                    send_msg(c_id, f"# ✅ Removed access from {parts[1]}", token=self.token, bot_idx=self.bot_index)
+                else:
+                    send_msg(c_id, "# ℹ️ User doesn't have access", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "showusers":
+                if not SUDO_USERS:
+                    send_msg(c_id, "# ℹ️ No access users added yet.", token=self.token, bot_idx=self.bot_index)
+                    return
+                user_list = "\n".join([f"# <@{uid}>" for uid in SUDO_USERS])
+                send_msg(c_id, f"# 📋 **Access Users:**\n{user_list}", token=self.token, bot_idx=self.bot_index)
+                return
+
+            if cmd_lower == "ping":
+                start = time.time()
+                requests.get("https://discord.com/api/v9/users/@me", headers={"Authorization": self.token}, timeout=5)
+                latency = round((time.time() - start) * 1000, 2)
+                send_msg(c_id, f"# 🏓 Pong! {latency}ms", token=self.token, bot_idx=self.bot_index)
+                return
+
+    def run(self):
+        while self.running:
+            try:
+                self.ws = websocket.WebSocketApp("wss://gateway.discord.gg/?v=9&encoding=json",
+                                                 on_message=self.on_message)
+                self.ws.run_forever()
+            except Exception as e:
+                print(f"[!] Bot {self.bot_index + 1} error: {e}")
+                time.sleep(5)
+
+# ==================== LAUNCH ALL BOTS ====================
+def run_all_bots():
+    global TOKENS, BOT_INSTANCES
+
+    print("=" * 60)
+    print("      ZAYN BOT ENGINE LOADED")
+    print("=" * 60)
+
+    clean_tokens = [t.strip() for t in TOKENS if t and t.strip() and not t.startswith('.')]
+    
+    if not clean_tokens or clean_tokens[0] == "YOUR_DISCORD_TOKEN_HERE":
+        print("[!] Token configure nahi kiya gaya hai! Script ke andar TOKENS variable me token dalein.")
+        return
+
+    print(f"[!] Total tokens loaded: {len(clean_tokens)}")
+
+    for i, token in enumerate(clean_tokens):
+        bot = DiscordSelfBot(token, i)
+        BOT_INSTANCES.append(bot)
+        thread = threading.Thread(target=bot.run, daemon=True)
+        thread.start()
+        time.sleep(1)
+
+    print("[✓] All bots online.")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[!] Shutting down all bots...")
+        for bot in BOT_INSTANCES:
+            bot.running = False
+
+if __name__ == "__main__":
+    run_all_bots()
