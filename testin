@@ -1,0 +1,268 @@
+-- ============================================
+-- ADVANCED FIREBASE URL EXTRACTOR v2.0
+-- With HTTP Spy & Better Error Handling
+-- ============================================
+
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+
+-- Results storage
+local FOUND_URLS = {}
+local FOUND_SECRETS = {}
+local HTTP_CAPTURED = {}
+local scanStart = tick()
+
+-- Safe print function
+local function log(msg)
+    print(string.format("[%.2fs] %s", tick() - scanStart, msg))
+end
+
+-- Safe wrapper for all operations
+local function safeCall(func, ...)
+    local success, result = pcall(func, ...)
+    return success, result
+end
+
+-- ============================================
+-- HTTP SPY - Intercept all requests
+-- ============================================
+log("🔧 Installing HTTP Spy...")
+
+local HttpService = game:GetService("HttpService")
+local originalMethods = {}
+
+-- Store originals
+originalMethods.RequestAsync = HttpService.RequestAsync
+originalMethods.GetAsync = HttpService.GetAsync  
+originalMethods.PostAsync = HttpService.PostAsync
+
+-- Install hooks
+safeCall(function()
+    HttpService.RequestAsync = function(self, request)
+        if type(request) == "table" and request.Url then
+            local url = tostring(request.Url)
+            log("🌐 HTTP RequestAsync: " .. url:sub(1, 80))
+            table.insert(HTTP_CAPTURED, {method = "RequestAsync", url = url})
+            if url:match("firebase") or url:match("database") then
+                table.insert(FOUND_URLS, url)
+                log("✅ FIREBASE URL CAPTURED: " .. url)
+            end
+        end
+        return originalMethods.RequestAsync(self, request)
+    end
+end)
+
+safeCall(function()
+    HttpService.GetAsync = function(self, url, ...)
+        log("🌐 HTTP GetAsync: " .. tostring(url):sub(1, 80))
+        table.insert(HTTP_CAPTURED, {method = "GetAsync", url = tostring(url)})
+        if tostring(url):match("firebase") then
+            table.insert(FOUND_URLS, tostring(url))
+        end
+        return originalMethods.GetAsync(self, url, ...)
+    end
+end)
+
+safeCall(function()
+    HttpService.PostAsync = function(self, url, ...)
+        log("🌐 HTTP PostAsync: " .. tostring(url):sub(1, 80))
+        table.insert(HTTP_CAPTURED, {method = "PostAsync", url = tostring(url)})
+        if tostring(url):match("firebase") then
+            table.insert(FOUND_URLS, tostring(url))
+        end
+        return originalMethods.PostAsync(self, url, ...)
+    end
+end)
+
+-- Hook game.HttpGet/HttpPost
+safeCall(function()
+    if game.HttpGet then
+        local old = game.HttpGet
+        game.HttpGet = function(self, url, ...)
+            log("🌐 game.HttpGet: " .. tostring(url):sub(1, 80))
+            table.insert(HTTP_CAPTURED, {method = "game.HttpGet", url = tostring(url)})
+            if tostring(url):match("firebase") then
+                table.insert(FOUND_URLS, tostring(url))
+            end
+            return old(self, url, ...)
+        end
+    end
+end)
+
+safeCall(function()
+    if game.HttpPost then
+        local old = game.HttpPost
+        game.HttpPost = function(self, url, ...)
+            log("🌐 game.HttpPost: " .. tostring(url):sub(1, 80))
+            table.insert(HTTP_CAPTURED, {method = "game.HttpPost", url = tostring(url)})
+            if tostring(url):match("firebase") then
+                table.insert(FOUND_URLS, tostring(url))
+            end
+            return old(self, url, ...)
+        end
+    end
+end)
+
+log("✅ HTTP Spy installed! Waiting for requests...")
+
+-- ============================================
+-- DEEP SCANNER
+-- ============================================
+local function isURL(str)
+    if type(str) ~= "string" then return false end
+    return str:match("^https?://") ~= nil
+end
+
+local function containsFirebase(str)
+    if type(str) ~= "string" then return false end
+    local lower = str:lower()
+    return lower:find("firebase") or lower:find("database") or 
+           lower:find("rtdb") or (lower:find("google") and lower:find("com"))
+end
+
+local function addFinding(category, path, value)
+    if type(value) ~= "string" then return end
+    table.insert(FOUND_SECRETS, {
+        category = category,
+        path = path,
+        value = value,
+        time = tick() - scanStart
+    })
+    log(string.format("📦 [%s] %s = %s", category, path, value:sub(1, 60)))
+end
+
+-- ============================================
+-- SCAN 1: Global Environment
+-- ============================================
+log("\n🔍 [1/8] Scanning Global Environment...")
+
+safeCall(function()
+    for k, v in pairs(_G) do
+        if type(v) == "string" then
+            if isURL(v) then
+                addFinding("GLOBAL_URL", "_G."..k, v)
+                table.insert(FOUND_URLS, v)
+            elseif containsFirebase(v) then
+                addFinding("GLOBAL_SUSPECT", "_G."..k, v)
+            end
+        end
+    end
+end)
+
+safeCall(function()
+    if shared then
+        for k, v in pairs(shared) do
+            if type(v) == "string" then
+                if isURL(v) then
+                    addFinding("SHARED_URL", "shared."..k, v)
+                    table.insert(FOUND_URLS, v)
+                elseif containsFirebase(v) then
+                    addFinding("SHARED_SUSPECT", "shared."..k, v)
+                end
+            end
+        end
+    end
+end)
+
+-- ============================================
+-- SCAN 2: Script Sources
+-- ============================================
+log("\n🔍 [2/8] Analyzing Script Sources...")
+
+local patterns = {
+    "https?://[%w%-%.]+%.firebaseio%.com",
+    "https?://[%w%-%.]+%.firebasedatabase%.app",
+    "https?://[%w%-%.]+%.firebaseapp%.com",
+    "projects/[%w%-]+/databases",
+    "AIzaSy[%w%-_]+",  -- Firebase API keys
+    "firebaseio%.com",
+    "firebasedatabase",
+    "realtime%-database",
+}
+
+safeCall(function()
+    for _, obj in ipairs(game:GetDescendants()) do
+        safeCall(function()
+            if obj:IsA("Script") or obj:IsA("LocalScript") or obj:IsA("ModuleScript") then
+                local success, source = pcall(function() return obj.Source end)
+                if success and source and type(source) == "string" then
+                    for _, pattern in ipairs(patterns) do
+                        for match in source:gmatch(pattern) do
+                            addFinding("SOURCE", obj:GetFullName(), match)
+                            if match:match("^https?://") then
+                                table.insert(FOUND_URLS, match)
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+end)
+
+-- ============================================
+-- SCAN 3: Module Returns
+-- ============================================
+log("\n🔍 [3/8] Analyzing Module Returns...")
+
+safeCall(function()
+    for _, obj in ipairs(game:GetDescendants()) do
+        safeCall(function()
+            if obj:IsA("ModuleScript") then
+                local success, module = pcall(require, obj)
+                if success then
+                    if type(module) == "table" then
+                        for k, v in pairs(module) do
+                            if type(v) == "string" then
+                                if isURL(v) then
+                                    addFinding("MODULE_URL", obj.Name.."."..k, v)
+                                    table.insert(FOUND_URLS, v)
+                                elseif containsFirebase(v) then
+                                    addFinding("MODULE_SUSPECT", obj.Name.."."..k, v)
+                                end
+                            end
+                        end
+                    elseif type(module) == "string" and (isURL(module) or containsFirebase(module)) then
+                        addFinding("MODULE_RETURN", obj.Name, module)
+                    end
+                end
+            end
+        end)
+    end
+end)
+
+-- ============================================
+-- SCAN 4: Deep Recursive Scan
+-- ============================================
+log("\n🔍 [4/8] Deep Recursive Scan...")
+
+local scanned = {}
+local scanCount = 0
+
+local function deepScan(t, path, depth)
+    if depth > 8 then return end
+    if type(t) ~= "table" then return end
+    if scanned[t] then return end
+    scanned[t] = true
+    scanCount = scanCount + 1
+    
+    for k, v in pairs(t) do
+        local newPath = path .. "." .. tostring(k)
+        safeCall(function()
+            if type(v) == "string" then
+                if isURL(v) then
+                    addFinding("DEEP_URL", newPath, v)
+                    table.insert(FOUND_URLS, v)
+                elseif containsFirebase(v) and #v > 8 then
+                    addFinding("DEEP_SUSPECT", newPath, v)
+                end
+            elseif type(v) == "table" then
+                deepScan(v, newPath, depth + 1)
+            elseif type(v) == "function" then
+                -- Check upvalues
+                for i = 1, 20 do
+                    local name, val = debug.getupvalue(v, i)
+                    if not name then break end
+                    if type(val) == "string" and (isURL(val) or containsFirebase(val)) then
+                        addFinding("UPVALUE", newPath..".upvalue["..name
