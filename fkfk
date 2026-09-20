@@ -1,0 +1,367 @@
+-- ============================================
+-- AGGRESSIVE FIREBASE URL EXTRACTOR
+-- Tests ALL vectors in one run
+-- ============================================
+
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+
+print("\n🔥 AGGRESSIVE FIREBASE URL EXTRACTION STARTED 🔥\n")
+
+local FOUND_URLS = {}
+local FOUND_SECRETS = {}
+local scanStart = tick()
+
+-- Utility functions
+local function addFinding(category, path, value)
+    table.insert(FOUND_SECRETS, {
+        category = category,
+        path = path,
+        value = value,
+        timestamp = tick() - scanStart
+    })
+    print(string.format("[%s] %s = %s", category, path, value:sub(1, 60)))
+end
+
+local function isURL(str)
+    if type(str) ~= "string" then return false end
+    return string.match(str, "^https?://") ~= nil
+end
+
+local function containsFirebase(str)
+    if type(str) ~= "string" then return false end
+    local lower = str:lower()
+    return string.find(lower, "firebase") or 
+           string.find(lower, "database") or
+           string.find(lower, "rtdb") or
+           (string.find(lower, "google") and string.find(lower, "com"))
+end
+
+-- ============================================
+-- VECTOR 1: Direct Global Scan
+-- ============================================
+print("\n[1/10] Scanning _G and shared...")
+
+for k, v in pairs(_G) do
+    if type(v) == "string" then
+        if isURL(v) or containsFirebase(v) then
+            addFinding("GLOBAL", "_G."..k, v)
+            if isURL(v) then table.insert(FOUND_URLS, v) end
+        end
+    end
+end
+
+if shared then
+    for k, v in pairs(shared) do
+        if type(v) == "string" then
+            if isURL(v) or containsFirebase(v) then
+                addFinding("SHARED", "shared."..k, v)
+                if isURL(v) then table.insert(FOUND_URLS, v) end
+            end
+        end
+    end
+end
+
+-- ============================================
+-- VECTOR 2: Script Source Analysis
+-- ============================================
+print("\n[2/10] Analyzing script sources...")
+
+local patterns = {
+    "https?://[%w%-%.]+%.firebaseio%.com",
+    "https?://[%w%-%.]+%.firebasedatabase%.app",
+    "projects/[%w%-]+/databases",
+    "AIzaSy[%w%-_]+",  -- API keys
+    "firebaseio%.com",
+    "firebasedatabase%.app",
+}
+
+for _, obj in ipairs(game:GetDescendants()) do
+    if obj:IsA("Script") or obj:IsA("LocalScript") or obj:IsA("ModuleScript") then
+        local success, source = pcall(function() return obj.Source end)
+        if success and source then
+            for _, pattern in ipairs(patterns) do
+                for match in string.gmatch(source, pattern) do
+                    addFinding("SOURCE", obj.Name, match)
+                end
+            end
+        end
+    end
+end
+
+-- ============================================
+-- VECTOR 3: Module Return Analysis
+-- ============================================
+print("\n[3/10] Analyzing module returns...")
+
+for _, obj in ipairs(game:GetDescendants()) do
+    if obj:IsA("ModuleScript") then
+        local success, module = pcall(require, obj)
+        if success then
+            if type(module) == "table" then
+                for k, v in pairs(module) do
+                    if type(v) == "string" and (isURL(v) or containsFirebase(v)) then
+                        addFinding("MODULE", obj.Name.."."..k, v)
+                        if isURL(v) then table.insert(FOUND_URLS, v) end
+                    end
+                end
+            elseif type(module) == "string" and (isURL(module) or containsFirebase(module)) then
+                addFinding("MODULE", obj.Name, module)
+            end
+        end
+    end
+end
+
+-- ============================================
+-- VECTOR 4: Deep Table Scan (Recursive)
+-- ============================================
+print("\n[4/10] Deep recursive table scan...")
+
+local scanned = {}
+local function deepScan(t, path, depth)
+    if depth > 10 then return end
+    if type(t) ~= "table" then return end
+    if scanned[t] then return end
+    scanned[t] = true
+    
+    for k, v in pairs(t) do
+        local newPath = path .. "." .. tostring(k)
+        if type(v) == "string" then
+            if isURL(v) then
+                addFinding("DEEPSCAN", newPath, v)
+                table.insert(FOUND_URLS, v)
+            elseif containsFirebase(v) and #v > 10 then
+                addFinding("DEEPSCAN_SUSPECT", newPath, v)
+            end
+        elseif type(v) == "table" then
+            deepScan(v, newPath, depth + 1)
+        elseif type(v) == "function" then
+            -- Check upvalues
+            for i = 1, 15 do
+                local name, val = debug.getupvalue(v, i)
+                if not name then break end
+                if type(val) == "string" and (isURL(val) or containsFirebase(val)) then
+                    addFinding("UPVALUE", newPath..".upvalue["..name.."]", val)
+                    if isURL(val) then table.insert(FOUND_URLS, val) end
+                end
+            end
+        end
+    end
+    
+    -- Check metatable
+    local mt = getmetatable(t)
+    if mt then
+        deepScan(mt, path..".[metatable]", depth + 1)
+    end
+end
+
+deepScan(_G, "_G", 0)
+if shared then deepScan(shared, "shared", 0) end
+
+-- Check registry
+local registry = debug.getregistry()
+if registry then
+    deepScan(registry, "[registry]", 0)
+end
+
+-- ============================================
+-- VECTOR 5: String Fragment Assembly
+-- ============================================
+print("\n[5/10] Attempting string fragment assembly...")
+
+local fragments = {protocol = {}, domain = {}, path = {}}
+
+-- Collect all strings
+local allStrings = {}
+local stringSeen = {}
+
+local function collectAllStrings(t, depth)
+    if depth > 5 then return end
+    if type(t) ~= "table" then return end
+    if stringSeen[t] then return end
+    stringSeen[t] = true
+    
+    for k, v in pairs(t) do
+        if type(v) == "string" and #v > 2 then
+            if not stringSeen[v] then
+                stringSeen[v] = true
+                table.insert(allStrings, v)
+            end
+        elseif type(v) == "table" then
+            collectAllStrings(v, depth + 1)
+        end
+    end
+end
+
+collectAllStrings(_G, 0)
+if shared then collectAllStrings(shared, 0) end
+
+-- Categorize fragments
+for _, str in ipairs(allStrings) do
+    if string.match(str, "^https?://") then
+        table.insert(fragments.protocol, str)
+    elseif string.match(str, "firebase") or 
+           string.match(str, "database") or
+           string.match(str, "%.com$") or
+           string.match(str, "%.app$") then
+        table.insert(fragments.domain, str)
+    elseif string.match(str, "^/") or string.match(str, "%.json$") then
+        table.insert(fragments.path, str)
+    end
+end
+
+-- Try combinations
+for _, proto in ipairs(fragments.protocol) do
+    for _, domain in ipairs(fragments.domain) do
+        local combined = proto .. domain
+        if string.find(combined, "firebase") and string.find(combined, "%.com") then
+            addFinding("ASSEMBLED", "fragment_combo", combined)
+            table.insert(FOUND_URLS, combined)
+        end
+    end
+end
+
+-- ============================================
+-- VECTOR 6: HTTP Service Hook Test
+-- ============================================
+print("\n[6/10] Testing HTTP service hooks...")
+
+local HttpService = game:GetService("HttpService")
+local capturedBefore = #FOUND_URLS
+
+-- Try to hook and capture
+local originalRequest = HttpService.RequestAsync
+local success = pcall(function()
+    HttpService.RequestAsync = function(self, request)
+        if type(request) == "table" and request.Url then
+            addFinding("HTTP_HOOK", "RequestAsync", request.Url)
+            table.insert(FOUND_URLS, request.Url)
+        end
+        return originalRequest(self, request)
+    end
+end)
+
+if success then
+    print("    ⚠️ HTTP Service hook successful - waiting for requests...")
+    wait(2)
+    HttpService.RequestAsync = originalRequest
+else
+    print("    ✅ HTTP Service protected from hooking")
+end
+
+-- ============================================
+-- VECTOR 7: Remote Event Analysis
+-- ============================================
+print("\n[7/10] Analyzing RemoteEvents...")
+
+for _, obj in ipairs(game:GetDescendants()) do
+    if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+        local name = obj.Name:lower()
+        if string.find(name, "firebase") or 
+           string.find(name, "database") or
+           string.find(name, "url") or
+           string.find(name, "config") then
+            addFinding("REMOTE", obj:GetFullName(), "[Suspicious RemoteEvent]")
+        end
+    end
+end
+
+-- ============================================
+-- VECTOR 8: Raw Table Access Bypass
+-- ============================================
+print("\n[8/10] Attempting raw table access bypass...")
+
+local rawKeys = {"url", "URL", "firebase", "database", "endpoint", "config", "api"}
+
+for _, key in ipairs(rawKeys) do
+    local value = rawget(_G, key)
+    if type(value) == "string" and (isURL(value) or containsFirebase(value)) then
+        addFinding("RAWGET", "_G."..key, value)
+        table.insert(FOUND_URLS, value)
+    end
+end
+
+-- ============================================
+-- VECTOR 9: Coroutine Inspection
+-- ============================================
+print("\n[9/10] Inspecting coroutines...")
+
+local current = coroutine.running()
+if current then
+    for i = 1, 10 do
+        local name, value = debug.getlocal(current, i)
+        if not name then break end
+        if type(value) == "string" and (isURL(value) or containsFirebase(value)) then
+            addFinding("COROUTINE", "local["..name.."]", value)
+            table.insert(FOUND_URLS, value)
+        end
+    end
+end
+
+-- ============================================
+-- VECTOR 10: Bytecode Constant Extraction
+-- ============================================
+print("\n[10/10] Bytecode constant extraction...")
+
+for _, obj in ipairs(game:GetDescendants()) do
+    if obj:IsA("ModuleScript") then
+        local success, module = pcall(require, obj)
+        if success and type(module) == "function" then
+            for i = 1, 20 do
+                local ok, const = pcall(function()
+                    return debug.getconstant(module, i)
+                end)
+                if ok and type(const) == "string" then
+                    if isURL(const) or (containsFirebase(const) and #const > 10) then
+                        addFinding("CONSTANT", obj.Name.."["..i.."]", const)
+                        if isURL(const) then table.insert(FOUND_URLS, const) end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- ============================================
+-- FINAL REPORT
+-- ============================================
+print("\n" .. string.rep("=", 70))
+print("🔥 EXTRACTION COMPLETE 🔥")
+print(string.rep("=", 70))
+
+print(string.format("\nScan Duration: %.2f seconds", tick() - scanStart))
+print(string.format("Total Findings: %d", #FOUND_SECRETS))
+print(string.format("Unique URLs Found: %d", #FOUND_URLS))
+
+if #FOUND_URLS > 0 then
+    print("\n" .. string.rep("-", 70))
+    print("EXTRACTED FIREBASE URLs:")
+    print(string.rep("-", 70))
+    for i, url in ipairs(FOUND_URLS) do
+        print(string.format("[%d] %s", i, url))
+    end
+    print("\n⚠️  SECURITY BREACH: URLs are exposed!")
+else
+    print("\n✅ NO URLs FOUND - Security appears strong")
+end
+
+if #FOUND_SECRETS > 0 then
+    print("\n" .. string.rep("-", 70))
+    print("ALL SUSPICIOUS FINDINGS:")
+    print(string.rep("-", 70))
+    for _, finding in ipairs(FOUND_SECRETS) do
+        print(string.format("[%s] %s = %s", 
+            finding.category, 
+            finding.path, 
+            finding.value:sub(1, 50)))
+    end
+end
+
+print(string.rep("=", 70))
+
+return {
+    urls = FOUND_URLS,
+    findings = FOUND_SECRETS,
+    vulnerable = #FOUND_URLS > 0
+}
